@@ -7,11 +7,50 @@ from pathlib import Path
 DB_PATH = "milk_tea.db"
 SEED_CSV = Path.home() / "OneDrive" / "桌面" / "BevFood" / "product_lists_combined.csv"
 
+CATEGORIES = [
+    "Tea",
+    "Topping",
+    "Syrup",
+    "Powder",
+    "Food",
+    "Packaging",
+    "Bag",
+    "Sealing Film",
+    "Large Equipment",
+]
+
+# Maps messy CSV category names → canonical names
+_CAT_NORM = {
+    "toppings":       "Topping",
+    "popping boba":   "Topping",
+    "jelly toppings": "Topping",
+    "syrups":         "Syrup",
+    "syrup":          "Syrup",
+    "powders":        "Powder",
+    "powder":         "Powder",
+    "food items":     "Food",
+    "food":           "Food",
+    "equipment":      "Large Equipment",
+    "packaging":      "Packaging",
+    "tea":            "Tea",
+    "bag":            "Bag",
+    "sealing film":   "Sealing Film",
+    "large equipment":"Large Equipment",
+}
+
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def get_conn():
     return sqlite3.connect(DB_PATH)
+
+
+def _normalise_categories(c):
+    for raw, canonical in _CAT_NORM.items():
+        c.execute(
+            "UPDATE products SET category=? WHERE LOWER(TRIM(category))=?",
+            (canonical, raw),
+        )
 
 
 def init_db():
@@ -39,6 +78,8 @@ def init_db():
             df[["client", "category", "item_name", "sku", "cost"]].to_sql(
                 "products", c, if_exists="append", index=False
             )
+        # Always normalise categories (fixes existing rows too)
+        _normalise_categories(c)
 
 
 def fetch_all() -> pd.DataFrame:
@@ -82,41 +123,99 @@ def delete_item(id_):
 def page_add():
     st.header("Add New Item")
 
-    clients    = fetch_distinct("client")
-    categories = fetch_distinct("category")
+    clients = fetch_distinct("client")
 
     with st.form("add_form", clear_on_submit=True):
         st.markdown("**Client Name**")
         c1, c2 = st.columns(2)
         with c1:
-            client_sel = st.selectbox("Select existing client", [""] + clients, label_visibility="collapsed")
+            client_sel = st.selectbox(
+                "Select existing client", [""] + clients, label_visibility="collapsed"
+            )
         with c2:
-            client_new = st.text_input("Or type a new client name", placeholder="New client…")
+            client_new = st.text_input(
+                "Or type a new client name", placeholder="New client…"
+            )
 
         st.markdown("**Category**")
-        c3, c4 = st.columns(2)
-        with c3:
-            cat_sel = st.selectbox("Select existing category", [""] + categories, label_visibility="collapsed")
-        with c4:
-            cat_new = st.text_input("Or type a new category", placeholder="New category…")
+        cat_sel = st.selectbox("Category", CATEGORIES, label_visibility="collapsed")
 
         item_name = st.text_input("Item Name *")
 
-        submitted = st.form_submit_button("Add Item", type="primary", use_container_width=True)
+        submitted = st.form_submit_button(
+            "Add Item", type="primary", use_container_width=True
+        )
 
     if submitted:
         final_client = client_new.strip() or client_sel
-        final_cat    = cat_new.strip()    or cat_sel
 
         if not final_client:
             st.error("Client name is required.")
-        elif not final_cat:
-            st.error("Category is required.")
         elif not item_name.strip():
             st.error("Item name is required.")
         else:
-            insert_item(final_client, final_cat, item_name.strip(), "", "")
-            st.success(f"✅ **{item_name.strip()}** added to **{final_client} / {final_cat}**.")
+            insert_item(final_client, cat_sel, item_name.strip(), "", "")
+            st.success(
+                f"✅ **{item_name.strip()}** added to **{final_client} / {cat_sel}**."
+            )
+
+
+def page_search():
+    st.header("Client Search")
+    st.caption("Look up all ingredients ordered by a specific client.")
+
+    clients = fetch_distinct("client")
+    if not clients:
+        st.info("No data yet.")
+        return
+
+    selected = st.selectbox("Select a client", [""] + clients)
+
+    if not selected:
+        return
+
+    df = fetch_all()
+    result = df[df["client"] == selected].copy()
+
+    if result.empty:
+        st.warning(f"No items found for **{selected}**.")
+        return
+
+    st.markdown(f"### {selected} — {len(result)} item(s)")
+
+    for cat in CATEGORIES:
+        subset = result[result["category"] == cat]
+        if subset.empty:
+            continue
+        with st.expander(f"**{cat}** ({len(subset)})", expanded=True):
+            st.dataframe(
+                subset[["item_name", "sku", "cost"]].rename(
+                    columns={
+                        "item_name": "Item Name",
+                        "sku": "SKU",
+                        "cost": "Cost",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # Catch-all for any categories not in the canonical list
+    other = result[~result["category"].isin(CATEGORIES)]
+    if not other.empty:
+        with st.expander(f"**Other** ({len(other)})", expanded=True):
+            st.dataframe(
+                other[["category", "item_name", "sku", "cost"]].rename(
+                    columns={
+                        "category": "Category",
+                        "item_name": "Item Name",
+                        "sku": "SKU",
+                        "cost": "Cost",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def page_edit_delete():
@@ -127,12 +226,11 @@ def page_edit_delete():
         st.info("No items in the database yet.")
         return
 
-    # ── Filters
     col1, col2, col3 = st.columns(3)
     with col1:
         f_client = st.selectbox("Client", ["All"] + sorted(df["client"].unique().tolist()))
     with col2:
-        f_cat = st.selectbox("Category", ["All"] + sorted(df["category"].unique().tolist()))
+        f_cat = st.selectbox("Category", ["All"] + CATEGORIES)
     with col3:
         f_search = st.text_input("Search item name", placeholder="Type to filter…")
 
@@ -148,8 +246,10 @@ def page_edit_delete():
 
     st.dataframe(
         filtered[["id", "client", "category", "item_name", "sku", "cost"]].rename(
-            columns={"id": "ID", "client": "Client", "category": "Category",
-                     "item_name": "Item Name", "sku": "SKU", "cost": "Cost"}
+            columns={
+                "id": "ID", "client": "Client", "category": "Category",
+                "item_name": "Item Name", "sku": "SKU", "cost": "Cost",
+            }
         ),
         use_container_width=True,
         hide_index=True,
@@ -171,8 +271,8 @@ def page_edit_delete():
     )
 
     row = df[df["id"] == selected_id].iloc[0]
-    all_clients    = fetch_distinct("client")
-    all_categories = fetch_distinct("category")
+    all_clients = fetch_distinct("client")
+    cat_index   = CATEGORIES.index(row["category"]) if row["category"] in CATEGORIES else 0
 
     with st.form("edit_form"):
         ec1, ec2 = st.columns(2)
@@ -183,18 +283,15 @@ def page_edit_delete():
                 index=all_clients.index(row["client"]) if row["client"] in all_clients else 0,
             )
         with ec2:
-            e_cat = st.selectbox(
-                "Category",
-                all_categories,
-                index=all_categories.index(row["category"]) if row["category"] in all_categories else 0,
-            )
+            e_cat = st.selectbox("Category", CATEGORIES, index=cat_index)
+
         e_name = st.text_input("Item Name", value=row["item_name"])
         e_sku  = st.text_input("SKU",  value=row["sku"]  or "")
         e_cost = st.text_input("Cost", value=row["cost"] or "")
 
         btn1, btn2 = st.columns(2)
         with btn1:
-            save = st.form_submit_button("Save Changes", type="primary", use_container_width=True)
+            save   = st.form_submit_button("Save Changes", type="primary", use_container_width=True)
         with btn2:
             remove = st.form_submit_button("Delete Item", use_container_width=True)
 
@@ -215,7 +312,6 @@ def page_edit_delete():
 def page_import_export():
     st.header("Import / Export")
 
-    # Export
     st.subheader("Export")
     df = fetch_all()
     st.download_button(
@@ -228,7 +324,6 @@ def page_import_export():
 
     st.divider()
 
-    # Import
     st.subheader("Import")
     st.info(
         "Upload a CSV with columns: **client** (or *store*), **category**, **item_name**. "
@@ -271,8 +366,9 @@ def page_import_export():
 # ── App shell ─────────────────────────────────────────────────────────────────
 
 PAGES = {
-    "➕  Add Item":       page_add,
-    "✏️  Edit / Delete":  page_edit_delete,
+    "➕  Add Item":        page_add,
+    "🔍  Client Search":   page_search,
+    "✏️  Edit / Delete":   page_edit_delete,
     "📥  Import / Export": page_import_export,
 }
 
@@ -289,7 +385,9 @@ def main():
         st.title("🧋 MTI Manager")
         st.caption("Milk Tea Ingredient Manager")
         st.divider()
-        choice = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
+        choice = st.radio(
+            "Navigation", list(PAGES.keys()), label_visibility="collapsed"
+        )
 
     PAGES[choice]()
 
